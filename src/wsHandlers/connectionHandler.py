@@ -1,17 +1,19 @@
 import websocket
 import json
+import time
 from utils.logger import log
+from configure import load_config, update_client_id
 
 class WebSocketClient:
-    def __init__(self, server_uri, trainer):
+    def __init__(self, server_uri,trainer):
         self.server_uri = server_uri
-        self.trainer = trainer
         self.ws = None
+        self.trainer = trainer
+        self.config = load_config()
+        self.is_host = self.config["client_id"] == ""
 
     def connect(self):
-        """
-        Connect to the WebSocket server.
-        """
+        """Connect to the WebSocket server."""
         self.ws = websocket.WebSocketApp(
             self.server_uri,
             on_open=self.on_open,
@@ -23,30 +25,48 @@ class WebSocketClient:
         self.ws.run_forever(ping_timeout=60)
 
     def on_open(self, ws):
+        """Handles when the WebSocket connection opens."""
         log("Connection established with the server.")
 
+        if self.is_host:
+            log("Hosting the session...")
+            host_message = {
+                "type": "hostSession",
+                "password": self.config["client_password"],
+                "total_clients": self.config["number_of_clients"]
+            }
+            self.ws.send(json.dumps(host_message))
+        else:
+            log("Joining as a non-host client...")
+            join_message = {
+                "type": "joinRequest",
+                "client_id" : self.config["client_id"],
+                "password": self.config["client_password"]
+            }
+            self.ws.send(json.dumps(join_message))
+
     def on_message(self, ws, message):
-        """
-        Called when a message is received from the server.
-        """
-        # log(f"Message received from server: {message}")
+        """Handles incoming messages from the server."""
         try:
             data = json.loads(message)
-
-            if data["type"] == "clientId":
-                log(f"Received client ID: {data['clientId']}")
-
+            # log(f"Received message: {data}")
             received_parameters = None
+            if data["type"] == "hostRegistered":
+                update_client_id(data["clientId"])
+                log(f"Hosting session successfully with ID {data['clientId']}")
 
-            if data["type"] == "receiveAggregatedParameters":
+            elif data["type"] == "clientApproved":
+                log(f"Joined session successfully with ID {data['clientId']}")
+
+            elif data["type"] == "receiveAggregatedParameters":
                 received_parameters = data["parameters"]
-                log("received updated parameters")
-        
+                log("Received updated parameters from server.")
+
             updated_parameters = self.trainer.train(new_parameters=received_parameters)
 
             if updated_parameters is None:
                 log("Training complete. Closing connection.")
-                self.ws.close() 
+                self.ws.close()
             else:
                 self.send_parameters(updated_parameters)
 
@@ -60,13 +80,12 @@ class WebSocketClient:
         log(f"Error encountered: {error}")
 
     def send_parameters(self, parameters):
-        """
-        Send the parameters to the server in the specified format.
-        """
+        """Send the trained parameters to the server."""
+        self.config = load_config()
         if parameters is not None:
             message = {
+                "client_id" : self.config["client_id"],
                 "type": "sendParameters",
                 "parameters": parameters
             }
-            # log(f"Sending parameters to server: {message}")
             self.ws.send(json.dumps(message))
