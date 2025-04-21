@@ -1,1 +1,1 @@
-# Federated-Learning-Client
+# Federated-Learning-CNN-Client
