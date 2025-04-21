@@ -1,83 +1,94 @@
-import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+import tensorflow as tf
+from tensorflow.keras import layers, models
 from utils.logger import log
-import time
+import os
+import glob
+from PIL import Image
+from sklearn.model_selection import train_test_split
+import csv
+import time  #Added for tracking delay time
 
 class Trainer:
     def __init__(self):
-        # Initialize model parameters
-        self.theta = None
-        self.X = None
-        self.y = None
-        self.iterations = 0
-        self.scaler = None
+        self.model = self.build_model()
+        self.X_train, self.y_train = self.load_femnist_data()
+        self.epochs_per_round = 1  # Local epochs per FL round
+        self.max_fl_rounds = 10  # Total number of FL rounds
+        self.current_round = 0  # Track current round
+        self.final_parameters = None  
+        self.send_time = None  # <-- Added to store send timestamp
 
-        # Learning rate and total iterations
-        self.alpha = 0.001
-        self.max_iterations = 100
+        if os.path.exists("metric1.csv"):
+            open("metric1.csv", "w").close()
+        with open("metric1.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["cost", "accuracy", "delay"])  # <-- Added "delay" column
 
-        # Load and preprocess dataset
-        self.load_and_preprocess_data()
+    def build_model(self):
+        model = models.Sequential([
+            layers.Conv2D(32, (3, 3), activation='relu', input_shape=(28, 28, 1)),
+            layers.MaxPooling2D((2, 2)),
+            layers.Conv2D(64, (3, 3), activation='relu'),
+            layers.MaxPooling2D((2, 2)),
+            layers.Flatten(),
+            layers.Dense(128, activation='relu'),
+            layers.Dense(10, activation='softmax')
+        ])
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        return model
 
-        # Start with random parameters (Step 1)
-        self.initialize_random_parameters()
+    def load_femnist_data(self):
+        folder_path = os.path.join(os.path.dirname(__file__), "f1278_22")  # relative path
+        image_paths = glob.glob(os.path.join(folder_path, "*.png"))
+        images = []
+        labels = []
+        for path in image_paths:
+            img = Image.open(path).convert("L").resize((28, 28))  # resize to 28x28, grayscale
+            images.append(np.array(img) / 255.0)  # normalize image
+            label = int(os.path.basename(path).split("_")[3].split(".")[0])  # correct label extraction
+            labels.append(label)
 
-    def load_and_preprocess_data(self):
-        log("Loading and preprocessing dataset...")
-        data = pd.read_csv("src/models/Hyderabad_House_Data.csv")
-        data = data.dropna()
-
-        # One-hot encoding for categorical variables
-        self.X = pd.get_dummies(data.drop(['Price', 'Resale'], axis=1), drop_first=True).values
-        self.y = data['Price'].values
-
-        # Feature scaling
-        self.scaler = StandardScaler()
-        self.X = self.scaler.fit_transform(self.X)
-
-        # Add intercept term
-        self.X = np.c_[np.ones(self.X.shape[0]), self.X]
-
-    def initialize_random_parameters(self):
-        """
-        Step 1: Start with random parameters.
-        """
-        self.theta = np.random.rand(self.X.shape[1])
-
-    def hypothesis(self, X):
-        return np.dot(X, self.theta)
-
-    def compute_cost(self):
-        m = len(self.y)
-        predictions = self.hypothesis(self.X)
-        return (1 / (2 * m)) * np.sum(np.square(predictions - self.y))
+        X = np.array(images).reshape(-1, 28, 28, 1)  # reshape for CNN input
+        y = np.array(labels)
+        return X, y
 
     def train(self, new_parameters=None):
-        """
-        Train the model following the required steps.
-        :param new_parameters: Parameters (weights) received from the server.
-        :return: Updated parameters after a single training step.
-        """
-        if new_parameters is not None:
-            log("Updating parameters with received values")
-            self.theta = np.array(new_parameters)
+        if new_parameters is None:
+            self.current_round = 1
+            log(f"Starting FL round {self.current_round}/{self.max_fl_rounds}")
+            self.model.fit(self.X_train, self.y_train, epochs=self.epochs_per_round, verbose=0)
+            model_weights = self.model.get_weights()
+            log("Local training complete. Sending model weights.")
 
-        m = len(self.y)
-        predictions = self.hypothesis(self.X)
-        gradient = (1 / m) * np.dot(self.X.T, (predictions - self.y))
-        self.theta = self.theta - self.alpha * gradient
+            self.send_time = time.time()  # <-- Timestamp when sending model weights
 
-        self.iterations += 1
+            return model_weights
+        
+        # Receiving model weights (i.e., start of new round training)
+        receive_time = time.time()  # <-- Timestamp on receiving model weights
+        delay = None
+        if self.send_time is not None:
+            delay = receive_time - self.send_time  # <-- Calculate delay
+            self.send_time = None  # reset after using
 
-        time.sleep(1)
+        self.current_round += 1
+        self.model.set_weights(new_parameters)
+        test_loss, test_accuracy = self.model.evaluate(self.X_train, self.y_train, verbose=0)
+        with open("metric1.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([test_loss, test_accuracy, delay])  # <-- Write delay value
+        
+        if self.current_round > self.max_fl_rounds:
+            self.final_parameters = new_parameters
+            log(f"Final model evaluation - Accuracy: {test_accuracy:.4f}, Loss: {test_loss:.4f}")
+            return None
+        
+        log(f"Training local model for round {self.current_round}...")
+        self.model.fit(self.X_train, self.y_train, epochs=self.epochs_per_round, verbose=0)
+        model_weights = self.model.get_weights()
+        log("Local training complete. Sending model weights.")
 
-        cost = self.compute_cost()
-        log(f"Iteration {self.iterations}/{self.max_iterations}, Cost: {cost}")
+        self.send_time = time.time()  # <-- Again timestamp the send time for next delay
 
-        if self.iterations < self.max_iterations:
-            log("Sending trained parameters to server...")
-            updated_parameters = self.theta.tolist()
-            return updated_parameters 
-
-        return None 
+        return model_weights

@@ -1,5 +1,5 @@
 {
-    "number_of_clients": 3,
+    "number_of_clients": 2,
     "client_id": "",
-    "client_password": "secure"
+    "client_password": "password@123"
 }
